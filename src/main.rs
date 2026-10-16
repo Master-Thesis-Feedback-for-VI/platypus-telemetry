@@ -4,7 +4,7 @@ pub mod shared_data;
 use std::{
     error::Error,
     fmt::Display,
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -108,6 +108,62 @@ struct WriteLogData<'a> {
     topic: &'a str,
 }
 
+impl WriteLogData<'_> {
+    fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+        let data = self.to_string();
+        write!(writer, "{data}")
+    }
+
+    fn deserialize<R: Read>(reader: &mut R) -> io::Result<()> {
+        let metadata = Self::read_metadata(reader)?;
+        let mut metadata_values = metadata.split("||").map(str::trim);
+        let current_date_repr = metadata_values
+            .next()
+            .ok_or_else(|| Self::invalid_metadata_value("Could not parse date"))?;
+        let current_date = Self::date_into_chrono(current_date_repr);
+        todo!();
+
+        Ok(())
+    }
+
+    fn read_metadata<R: Read>(reader: &mut R) -> io::Result<String> {
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte);
+
+        if byte[0] != b'[' {
+            return Err(io::Error::new(ErrorKind::InvalidData, "Expected ["));
+        }
+
+        let mut metadata = Vec::new();
+        loop {
+            reader.read_exact(&mut byte)?;
+
+            if byte[0] == b']' {
+                break;
+            }
+
+            if metadata.len() > 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Metadata too large",
+                ));
+            }
+
+            metadata.push(byte[0]);
+        }
+
+        String::from_utf8(metadata).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))
+    }
+
+    fn date_into_chrono(date: &str) -> chrono::DateTime<Utc> {
+        todo!()
+    }
+
+    fn invalid_metadata_value(reason: &str) -> io::Error {
+        io::Error::new(ErrorKind::InvalidData, reason)
+    }
+}
+
 impl Display for WriteLogData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let current_date = self.timestamp.format("%Y-%m-%d %H:%M");
@@ -117,7 +173,7 @@ impl Display for WriteLogData<'_> {
         let data = self.log.data;
         write!(
             f,
-            "[{current_date} || {device:?} || {topic} || {tag}]:\t{data}"
+            "[ {current_date} || {device:?} || {topic} || {tag} ]:\t{data}"
         )
     }
 }
@@ -138,7 +194,8 @@ fn write_to_file<'a>(
     };
 
     writer.seek(SeekFrom::End(0))?;
-    writeln!(writer, "{data}")
+    data.serialize(&mut writer)?;
+    writeln!(writer, "")
 }
 
 #[cfg(test)]
