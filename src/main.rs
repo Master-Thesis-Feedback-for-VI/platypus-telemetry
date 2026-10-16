@@ -1,4 +1,5 @@
 pub mod environment;
+pub mod shared_data;
 
 use std::{
     error::Error,
@@ -13,7 +14,10 @@ use clap::Parser;
 use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient, SubscribeOptions};
 use serde::{Deserialize, Serialize};
 
-use crate::environment::{config, create_log_file};
+use crate::{
+    environment::{config, create_log_file},
+    shared_data::LogData,
+};
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -80,20 +84,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-enum DeviceType {
-    IOsApp,
-    LillyGo,
-    GalaxyWatch,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LogData<'a> {
-    device: DeviceType,
-    tag: &'a str,
-    data: &'a str,
-}
-
 trait IntoLogData<'a> {
     fn into_log_data(self) -> Result<LogData<'a>, serde_json::Error>;
 }
@@ -155,7 +145,7 @@ fn write_to_file<'a>(
 mod tests {
     use std::io::Cursor;
 
-    use crate::{DeviceType, LogData, write_to_file};
+    use crate::{LogData, shared_data::DeviceType, write_to_file};
 
     #[test]
     fn write_to_log() {
