@@ -26,12 +26,12 @@ pub struct ServerSettings {
 
 pub const ENV_FILE: &str = include_str!("../.env.toml");
 
-pub fn config() -> Result<Config, toml::de::Error> {
+pub(crate) fn config() -> Result<Config, toml::de::Error> {
     let conf: Config = toml::from_str(ENV_FILE)?;
     Ok(conf)
 }
 
-pub fn create_log_file(file_name: &str, timestamp: bool) -> io::Result<File> {
+pub(crate) fn create_log_file(file_name: &str, timestamp: bool) -> io::Result<File> {
     let log_name = if timestamp {
         let time = chrono::Local::now().format("%Y-%m-%d_%Hh%Mm").to_string();
         format!("{time}_{file_name}.log")

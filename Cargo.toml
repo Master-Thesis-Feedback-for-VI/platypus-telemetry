@@ -2,6 +2,11 @@
 name = "Platypus-Telemetry"
 version = "0.1.0"
 edition = "2024"
+description = "MQTT telemetry listener that subscribes to IoT device topics and logs the data to files"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Master-Thesis-Feedback-for-VI/platypus-telemetry"
+keywords = ["mqtt", "telemetry", "iot", "logging"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -21,4 +26,7 @@ pedantic = { level = "deny", priority = -1 }
 perf = { level = "deny", priority = -1 }
 style = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
+# Duplicate dependency versions come from transitive deps (mqtt5, clap) and
+# cannot be aligned from here, so this lint is not actionable.
+multiple_crate_versions = "allow"
 

@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     client
         .on_connection_event(|event| match event {
             ConnectionEvent::Reconnecting { attempt } => {
-                eprintln!("reconnecting (attempt {attempt})")
+                eprintln!("reconnecting (attempt {attempt})");
             }
             other => eprintln!("connection event: {other:?}"),
         })
@@ -57,16 +57,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
 
         let f = Arc::clone(&file);
-        let current_topic = topic.to_string();
+        let current_topic = topic.clone();
         client
             .subscribe_with_options(topic, options, move |msg| {
                 let mut f = f.lock().expect("Log mutex poisoned");
-                match write_to_file(&msg.payload, &current_topic, &mut *f) {
-                    Err(err) => {
-                        eprintln!("Failed to write log: {err}");
-                    }
-                    _ => (),
-                };
+
+                println!("Received data from: {current_topic}");
+                if let Err(err) = write_to_file(&msg.payload, &current_topic, &mut *f) {
+                    eprintln!("Failed to write log: {err}");
+                }
             })
             .await?;
     }
@@ -92,7 +91,7 @@ enum DeviceType {
 struct LogData<'a> {
     device: DeviceType,
     tag: &'a str,
-    log_data: &'a str,
+    data: &'a str,
 }
 
 trait IntoLogData<'a> {
@@ -100,7 +99,7 @@ trait IntoLogData<'a> {
 }
 
 impl<'a> IntoLogData<'a> for LogData<'a> {
-    fn into_log_data(self) -> Result<LogData<'a>, serde_json::Error> {
+    fn into_log_data(self) -> Result<Self, serde_json::Error> {
         Ok(self)
     }
 }
@@ -121,12 +120,15 @@ struct WriteLogData<'a> {
 
 impl Display for WriteLogData<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let date = self.timestamp.format("%Y-%m-%d %H:%M");
+        let current_date = self.timestamp.format("%Y-%m-%d %H:%M");
         let device = self.log.device;
         let topic = self.topic;
         let tag = self.log.tag;
-        let data = self.log.log_data;
-        write!(f, "[{date} || {device:?} || {topic} || {tag}]:\t{data}")
+        let data = self.log.data;
+        write!(
+            f,
+            "[{current_date} || {device:?} || {topic} || {tag}]:\t{data}"
+        )
     }
 }
 
@@ -161,14 +163,14 @@ mod tests {
         let log_data = LogData {
             device: DeviceType::IOsApp,
             tag: "ImageFlow",
-            log_data: "Detected 10 cars",
+            data: "Detected 10 cars",
         };
         write_to_file(log_data, "test/data", &mut buff).unwrap();
 
         let log_data = LogData {
             device: DeviceType::LillyGo,
             tag: "Vibrate",
-            log_data: "brimmm",
+            data: "brimmm",
         };
         write_to_file(log_data, "test/data", &mut buff).unwrap();
 
