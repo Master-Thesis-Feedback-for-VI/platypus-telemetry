@@ -2,21 +2,21 @@ pub mod environment;
 pub mod shared_data;
 
 use std::{
-    error::Error,
+    error::{self, Error},
     fmt::Display,
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use chrono::Utc;
+use chrono::{ParseResult, Utc};
 use clap::Parser;
 use mqtt5::{ConnectOptions, ConnectionEvent, MqttClient, SubscribeOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     environment::{config, create_log_file},
-    shared_data::LogData,
+    shared_data::{DeviceType, LogData},
 };
 
 #[derive(Parser, Debug)]
@@ -66,9 +66,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .subscribe_with_options(topic, options, move |msg| {
                 let mut f = f.lock().expect("Log mutex poisoned");
 
-                println!("Received data from: {current_topic}");
-                if let Err(err) = write_to_file(&msg.payload, &current_topic, &mut *f) {
-                    eprintln!("Failed to write log: {err}");
+                match write_to_file(&msg.payload, &current_topic, &mut *f) {
+                    Ok(written_log) => println!("Received: {written_log}"),
+                    Err(err) => eprintln!("Failed to write log: {err}"),
                 }
             })
             .await?;
@@ -84,51 +84,84 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-trait IntoLogData<'a> {
-    fn into_log_data(self) -> Result<LogData<'a>, serde_json::Error>;
+trait IntoLogData {
+    fn into_log_data(self) -> Result<LogData, serde_json::Error>;
 }
 
-impl<'a> IntoLogData<'a> for LogData<'a> {
+impl IntoLogData for LogData {
     fn into_log_data(self) -> Result<Self, serde_json::Error> {
         Ok(self)
     }
 }
 
-impl<'a, T: AsRef<[u8]> + ?Sized> IntoLogData<'a> for &'a T {
-    fn into_log_data(self) -> Result<LogData<'a>, serde_json::Error> {
+impl<T: AsRef<[u8]> + ?Sized> IntoLogData for &T {
+    fn into_log_data(self) -> Result<LogData, serde_json::Error> {
         serde_json::from_slice(AsRef::<[u8]>::as_ref(self))
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WriteLogData<'a> {
-    #[serde(borrow)]
-    log: LogData<'a>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WriteLogData {
+    log: LogData,
     timestamp: chrono::DateTime<Utc>,
-    topic: &'a str,
+    topic: Box<str>,
 }
 
-impl WriteLogData<'_> {
-    fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
+impl WriteLogData {
+    pub(crate) fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         let data = self.to_string();
         write!(writer, "{data}")
     }
 
-    fn deserialize<R: Read>(reader: &mut R) -> io::Result<()> {
+    pub(crate) fn deserialize<R: Read>(reader: &mut R) -> io::Result<Self> {
         let metadata = Self::read_metadata(reader)?;
         let mut metadata_values = metadata.split("||").map(str::trim);
+
         let current_date_repr = metadata_values
             .next()
             .ok_or_else(|| Self::invalid_metadata_value("Could not parse date"))?;
-        let current_date = Self::date_into_chrono(current_date_repr);
-        todo!();
+        let current_date =
+            Self::date_into_chrono(current_date_repr).map_err(Self::invalid_metadata_value)?;
 
-        Ok(())
+        let device_repr = metadata_values
+            .next()
+            .ok_or_else(|| Self::invalid_metadata_value("Could not parse date"))?;
+        let device: DeviceType = device_repr.parse().map_err(Self::invalid_metadata_value)?;
+
+        let topic = metadata_values
+            .next()
+            .ok_or_else(|| Self::invalid_metadata_value("Could not parse date"))?
+            .into();
+
+        let tag = metadata_values
+            .next()
+            .ok_or_else(|| Self::invalid_metadata_value("Could not parse date"))?
+            .into();
+
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte)?;
+        if byte[0] != b':' {
+            return Err(Self::invalid_metadata_value("Expected ':'"));
+        }
+
+        let mut data_buf = Vec::new();
+        reader.read_to_end(&mut data_buf)?;
+        let data = String::from_utf8(data_buf)
+            .map_err(Self::invalid_metadata_value)?
+            .trim()
+            .into();
+
+        let log_data = LogData { device, tag, data };
+        Ok(Self {
+            log: log_data,
+            timestamp: current_date,
+            topic,
+        })
     }
 
     fn read_metadata<R: Read>(reader: &mut R) -> io::Result<String> {
         let mut byte = [0u8; 1];
-        reader.read_exact(&mut byte);
+        reader.read_exact(&mut byte)?;
 
         if byte[0] != b'[' {
             return Err(io::Error::new(ErrorKind::InvalidData, "Expected ["));
@@ -155,22 +188,25 @@ impl WriteLogData<'_> {
         String::from_utf8(metadata).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))
     }
 
-    fn date_into_chrono(date: &str) -> chrono::DateTime<Utc> {
-        todo!()
+    fn date_into_chrono(date: &str) -> ParseResult<chrono::DateTime<Utc>> {
+        chrono::DateTime::parse_from_rfc3339(date).map(|dt| dt.with_timezone(&Utc))
     }
 
-    fn invalid_metadata_value(reason: &str) -> io::Error {
+    fn invalid_metadata_value<E>(reason: E) -> io::Error
+    where
+        E: Into<Box<dyn error::Error + Send + Sync>>,
+    {
         io::Error::new(ErrorKind::InvalidData, reason)
     }
 }
 
-impl Display for WriteLogData<'_> {
+impl Display for WriteLogData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let current_date = self.timestamp.format("%Y-%m-%d %H:%M");
+        let current_date = self.timestamp.to_rfc3339();
         let device = self.log.device;
-        let topic = self.topic;
-        let tag = self.log.tag;
-        let data = self.log.data;
+        let topic = self.topic.as_ref();
+        let tag = self.log.tag.as_ref();
+        let data = self.log.data.as_ref();
         write!(
             f,
             "[ {current_date} || {device:?} || {topic} || {tag} ]:\t{data}"
@@ -178,50 +214,63 @@ impl Display for WriteLogData<'_> {
     }
 }
 
-fn write_to_file<'a>(
-    payload: impl IntoLogData<'a>,
+fn write_to_file(
+    payload: impl IntoLogData,
     topic: &str,
     mut writer: impl Write + Seek,
-) -> io::Result<()> {
+) -> io::Result<WriteLogData> {
     let Ok(incoming_data) = payload.into_log_data() else {
-        return Ok(());
+        return Err(io::Error::new(ErrorKind::InvalidData, "Could not convert"));
     };
 
     let data = WriteLogData {
         log: incoming_data,
         timestamp: Utc::now(),
-        topic,
+        topic: topic.into(),
     };
 
     writer.seek(SeekFrom::End(0))?;
     data.serialize(&mut writer)?;
-    writeln!(writer, "")
+    writeln!(writer)?;
+
+    Ok(data)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{BufRead, Cursor, Seek, SeekFrom};
 
-    use crate::{LogData, shared_data::DeviceType, write_to_file};
+    use crate::{LogData, WriteLogData, shared_data::DeviceType, write_to_file};
 
     #[test]
     fn write_to_log() {
         let mut buff = Cursor::new(Vec::with_capacity(1024));
-        let log_data = LogData {
+        let log_data_img_flow = LogData {
             device: DeviceType::IOsApp,
-            tag: "ImageFlow",
-            data: "Detected 10 cars",
+            tag: "ImageFlow".into(),
+            data: "Detected 10 cars".into(),
         };
-        write_to_file(log_data, "test/data", &mut buff).unwrap();
+        let log_img_flow = write_to_file(log_data_img_flow, "test/data", &mut buff).unwrap();
 
-        let log_data = LogData {
+        let log_data_vibrate = LogData {
             device: DeviceType::LillyGo,
-            tag: "Vibrate",
-            data: "brimmm",
+            tag: "Vibrate".into(),
+            data: "brimmm".into(),
         };
-        write_to_file(log_data, "test/data", &mut buff).unwrap();
+        let log_vibrate = write_to_file(log_data_vibrate, "test/data", &mut buff).unwrap();
 
-        let res = String::from_utf8(buff.into_inner()).unwrap();
-        panic!("{res}")
+        buff.seek(SeekFrom::Start(0)).unwrap();
+
+        let mut line = String::new();
+        let _ = buff.read_line(&mut line);
+        let mut line_bytes = line.as_bytes();
+        let deserilized_data_img_flow = WriteLogData::deserialize(&mut line_bytes).unwrap();
+        assert_eq!(deserilized_data_img_flow, log_img_flow);
+
+        line = String::new();
+        let _ = buff.read_line(&mut line);
+        line_bytes = line.as_bytes();
+        let deserilized_data_vibrate = WriteLogData::deserialize(&mut line_bytes).unwrap();
+        assert_eq!(deserilized_data_vibrate, log_vibrate);
     }
 }
