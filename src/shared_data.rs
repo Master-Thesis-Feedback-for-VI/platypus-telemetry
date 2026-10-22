@@ -5,6 +5,7 @@ pub(crate) enum DeviceType {
     IOsApp,
     LillyGo,
     GalaxyWatch,
+    Observer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

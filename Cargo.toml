@@ -17,6 +17,10 @@ toml = "1.1"
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 strum = { version = "0.28.0", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7.0"
+unicode-width = "0.2"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -30,4 +34,3 @@ suspicious = { level = "deny", priority = -1 }
 # Duplicate dependency versions come from transitive deps (mqtt5, clap) and
 # cannot be aligned from here, so this lint is not actionable.
 multiple_crate_versions = "allow"
-

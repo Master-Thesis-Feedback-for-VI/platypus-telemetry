@@ -1,11 +1,12 @@
 pub mod environment;
 pub mod shared_data;
+mod ui;
 
 use std::{
     error::{self, Error},
     fmt::Display,
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
@@ -21,7 +22,6 @@ use crate::{
 
 #[derive(Parser, Debug)]
 struct Args {
-    protocol_name: String,
     #[arg(short, long)]
     time_stamp: bool,
 }
@@ -30,7 +30,12 @@ struct Args {
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    let config = config().expect(".env.toml missing");
+    let mut terminal = ui::TerminalSession::new()?;
+    let Some(participant) = ui::ask_participant(&mut terminal.terminal)? else {
+        return Ok(());
+    };
+    let file = Arc::new(Mutex::new(create_log_file(&participant, args.time_stamp)?));
+    let config = config()?;
     let credentials = &config.credentials;
 
     let options = ConnectOptions::new("telemetry-listener")
@@ -41,44 +46,72 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_reconnect_delay(Duration::from_secs(5), Duration::from_secs(120));
 
     let client = MqttClient::with_options(options);
+    let (messages, receiver) = mpsc::channel();
+    let connection_messages = messages.clone();
     client
-        .on_connection_event(|event| match event {
-            ConnectionEvent::Reconnecting { attempt } => {
-                eprintln!("reconnecting (attempt {attempt})");
-            }
-            other => eprintln!("connection event: {other:?}"),
+        .on_connection_event(move |event| {
+            let message = match event {
+                ConnectionEvent::Reconnecting { attempt } => {
+                    format!("Reconnecting (attempt {attempt})")
+                }
+                other => format!("Connection event: {other:?}"),
+            };
+            let _ = connection_messages.send(message);
         })
         .await?;
 
-    client.connect(&config.server_settings.uri).await?;
-    let file = create_log_file(&args.protocol_name, args.time_stamp)
-        .map(|val| Arc::new(Mutex::new(val)))?;
+    let mqtt_client = client.clone();
+    let mqtt_file = Arc::clone(&file);
+    let connection = tokio::spawn(async move {
+        if let Err(error) = subscribe(&mqtt_client, &config, &mqtt_file, &messages).await {
+            let _ = messages.send(format!("MQTT error: {error}"));
+        }
+    });
 
+    let result = ui::run(&mut terminal.terminal, &participant, &file, &receiver);
+    drop(terminal);
+    connection.abort();
+    let _ = connection.await;
+    let disconnect = tokio::time::timeout(Duration::from_secs(3), client.disconnect()).await;
+    file.lock()
+        .map_err(|_| io::Error::other("Log mutex poisoned"))?
+        .sync_all()?;
+    result?;
+    if let Ok(result) = disconnect {
+        result?;
+    }
+    Ok(())
+}
+
+async fn subscribe(
+    client: &MqttClient,
+    config: &environment::Config,
+    file: &Arc<Mutex<std::fs::File>>,
+    messages: &mpsc::Sender<String>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    client.connect(&config.server_settings.uri).await?;
     for topic in &config.server_settings.topics {
         let options = SubscribeOptions {
             qos: mqtt5::QoS::AtMostOnce,
             ..Default::default()
         };
 
-        let f = Arc::clone(&file);
+        let f = Arc::clone(file);
         let current_topic = topic.clone();
+        let messages = messages.clone();
         client
             .subscribe_with_options(topic, options, move |msg| {
-                let mut f = f.lock().expect("Log mutex poisoned");
-
-                match write_to_file(&msg.payload, &current_topic, &mut *f) {
-                    Ok(written_log) => println!("Received: {written_log}"),
-                    Err(err) => eprintln!("Failed to write log: {err}"),
-                }
+                let result = f
+                    .lock()
+                    .map_err(|_| io::Error::other("Log mutex poisoned"))
+                    .and_then(|mut f| write_to_file(&msg.payload, &current_topic, &mut *f));
+                let message = match result {
+                    Ok(written_log) => written_log.to_string(),
+                    Err(err) => format!("Failed to write log: {err}"),
+                };
+                let _ = messages.send(message);
             })
             .await?;
-    }
-
-    tokio::signal::ctrl_c().await?;
-    client.disconnect().await?;
-    {
-        let f = file.lock().expect("Lock poisoned");
-        f.sync_all()?;
     }
 
     Ok(())
