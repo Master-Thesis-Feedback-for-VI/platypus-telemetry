@@ -1,0 +1,47 @@
+name: Mirror to Tangled
+
+on:
+  push:
+    branches: [main]
+    tags: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-to-tangled
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out main and all tags
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push main and tags to Tangled
+        shell: bash
+        env:
+          TANGLED_SSH_PRIVATE_KEY: ${{ secrets.TANGLED_SSH_PRIVATE_KEY }}
+          TANGLED_KNOWN_HOSTS: ${{ secrets.TANGLED_KNOWN_HOSTS }}
+          TANGLED_REMOTE: yannbernard.tngl.sh@tangled.org:yannbernard.tngl.sh/Platypus-Telemetry
+        run: |
+          set -euo pipefail
+          : "${TANGLED_SSH_PRIVATE_KEY:?Missing TANGLED_SSH_PRIVATE_KEY secret}"
+          : "${TANGLED_KNOWN_HOSTS:?Missing TANGLED_KNOWN_HOSTS secret}"
+
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          chmod 700 "$ssh_dir"
+          printf '%s\n' "$TANGLED_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$TANGLED_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
+
+          export GIT_SSH_COMMAND="ssh -i '$ssh_dir/key' -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile='$ssh_dir/known_hosts'"
+          git push "$TANGLED_REMOTE" refs/heads/main:refs/heads/main --tags
